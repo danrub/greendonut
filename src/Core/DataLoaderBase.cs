@@ -34,6 +34,7 @@ namespace GreenDonut
         private ITaskCache<TValue> _cache;
         private readonly CacheKeyResolverDelegate<TKey> _cacheKeyResolver;
         private AutoResetEvent _delaySignal;
+        private AutoResetEvent _safeToDispose;
         private DataLoaderOptions<TKey> _options;
 
         /// <summary>
@@ -586,8 +587,9 @@ namespace GreenDonut
                 // function is called once within the constructor.
 
                 _delaySignal = new AutoResetEvent(true);
+                _safeToDispose = new AutoResetEvent(false);
 
-                Task.Factory.StartNew(async () =>
+                _ = Task.Factory.StartNew(async () =>
                 {
                     while (!_disposeTokenSource.IsCancellationRequested)
                     {
@@ -595,6 +597,9 @@ namespace GreenDonut
                         await DispatchBatchAsync(_disposeTokenSource.Token)
                             .ConfigureAwait(false);
                     }
+
+                    _safeToDispose.Set();
+
                 }, TaskCreationOptions.LongRunning);
             }
         }
@@ -615,9 +620,13 @@ namespace GreenDonut
             {
                 if (disposing)
                 {
-                    Clear();
                     _disposeTokenSource.Cancel();
                     _delaySignal?.Set();
+
+                    // wait until final dispatching loop completes, then continue. This will avoid unnecessary ObjectDisposedExceptions and properly dispatch final pending requests if any 
+                    _safeToDispose?.WaitOne();
+
+                    Clear();
                     (_cache as IDisposable).Dispose();
                     _disposeTokenSource.Dispose();
                     _delaySignal?.Dispose();
